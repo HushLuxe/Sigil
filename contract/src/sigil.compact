@@ -1,0 +1,203 @@
+// This file is part of HushLuxe/sigil.
+//
+// Sigil is a privacy-preserving authorization gate for autonomous
+// agents on the Midnight blockchain. An agent proves that an action is
+// inside its principal's private policy envelope — without revealing
+// the policy, the principal's identity, or the secret that binds them.
+//
+// Copyright (C) 2026 HushLuxe contributors
+// SPDX-License-Identifier: Apache-2.0
+
+pragma language_version >= 0.20;
+import CompactStandardLibrary;
+
+// =====================================================================
+// Types
+// =====================================================================
+
+// A hash identifying a registered policy. The policy itself is private;
+// only the principal who knows the secret can produce a witness matching
+// the commitment.
+export new type PolicyId = Bytes<32>;
+
+// The principal's derived public identity. Bound to a secret key + PIN.
+export new type PrincipalPk = Bytes<32>;
+
+// The secret an agent holds. Used to derive the principal identity.
+export new type SecretKey = Bytes<32>;
+
+// A per-intent replay nullifier.
+export new type Nullifier = Bytes<32>;
+
+// A single authorization rule. In Wave 1 each Sigil covers exactly one
+// (target, selector) triple and a per-call value cap. Wave 2 will extend
+// the policy to a bounded list of rules without changing the public API.
+struct Rule {
+    target: Bytes<32>;
+    selector: Uint<32>;
+    perCallCap: Uint<64>;
+}
+
+// A Sigil policy = the private envelope an agent proves it acts inside.
+// The policy contents are never disclosed; the contract only stores the
+// hash commitment (PolicyId) and the derived principal public key.
+struct SigilPolicy {
+    principalPk: PrincipalPk;
+    rule: Rule;
+    dailyCap: Uint<64>;
+    expiresAt: Uint<64>;
+    paused: Boolean;
+}
+
+// =====================================================================
+// Public ledger state
+// =====================================================================
+
+// Total number of intents the contract has authorized. The public signal
+// every sigil grants, with no information about which policies contributed.
+export ledger authorizedCount: Counter;
+
+// The set of registered policy commitments. A policy is "known" once
+// `publishPolicy` is called; authorization requires membership in this set.
+export ledger policies: Set<PolicyId>;
+
+// Replay-protection set. Every successful `authorize` call inserts a
+// nullifier derived from the agent's secret and the request id. The same
+// intent cannot be authorized twice.
+export ledger nullifiers: Set<Nullifier>;
+
+// Maps a principal's derived public key to its currently active policy.
+// A principal can hold at most one active policy at a time.
+export ledger principals: Map<PrincipalPk, PolicyId>;
+
+// =====================================================================
+// Private witnesses (provided off-chain by the agent)
+// =====================================================================
+
+// The agent's secret. Combined with the PIN, derives the principal identity.
+witness getUserSecret(): SecretKey;
+
+// The full private policy the agent claims to be acting under. The
+// contract never sees the plaintext on the ledger; it only computes the
+// commitment (PolicyId) inside the circuit and compares it to the set
+// of registered policies.
+witness getPolicy(): SigilPolicy;
+
+// =====================================================================
+// Pure circuits: identity, commitments, and nullifier derivation
+// (modeled on the zkloan identity pattern, see NOTICE)
+// =====================================================================
+
+// Derive a principal's public key from a secret and PIN. Domain-separated
+// hash so this key cannot collide with keys from any other protocol.
+export pure circuit derivePrincipalPk(sk: SecretKey, pin: Uint<16>): PrincipalPk {
+    return persistentHash<[Bytes<9>, Bytes<32>, SecretKey]>([
+        "sigil:pk:",
+        persistentHash<Uint<16>>(pin),
+        sk
+    ]) as PrincipalPk;
+}
+
+// Hash a policy to its commitment (PolicyId). The commitment is what the
+// ledger stores; the plaintext never leaves the witness.
+export pure circuit policyIdOf(p: SigilPolicy): PolicyId {
+    return persistentHash<SigilPolicy>(p) as PolicyId;
+}
+
+// Compute the replay nullifier for a (secret, requestId) pair. Including
+// the secret binds the nullifier to this specific principal so a different
+// principal cannot replay a captured nullifier.
+export pure circuit nullifierOf(sk: SecretKey, requestId: Uint<64>): Nullifier {
+    return persistentHash<[Bytes<10>, SecretKey, Uint<64>]>([
+        "sigil:nul:",
+        sk,
+        requestId
+    ]) as Nullifier;
+}
+
+// =====================================================================
+// Circuit: publish a private policy
+// =====================================================================
+// The principal commits to a policy and binds it to their derived public
+// key. The policy CONTENTS stay private (only the principal holds the
+// witness); the ledger only stores the commitment and the binding.
+//
+// A principal may hold at most one active policy. Re-publishing under a
+// new commitment is a Wave-2 feature; Wave 1 keeps the model explicit.
+export circuit publishPolicy(pin: Uint<16>): PolicyId {
+    const sk = getUserSecret();
+    const policy = getPolicy();
+    const pk = derivePrincipalPk(sk, pin);
+    assert(pk == policy.principalPk, "PIN does not match policy principal");
+    const id = policyIdOf(policy);
+    assert(!policies.member(disclose(id)), "Policy already registered");
+    assert(!principals.member(disclose(pk)), "Principal already has a policy");
+    policies.insert(disclose(id));
+    principals.insert(disclose(pk), disclose(id));
+    return disclose(id);
+}
+
+// =====================================================================
+// Circuit: authorize an intent under a private policy
+// =====================================================================
+// Proves that the intent (target, selector, value) is inside the private
+// policy envelope, authenticated by the principal who registered the
+// policy, and has not been authorized before. The policy contents, the
+// principal's secret, and the PIN remain private; the public outputs are
+// the nullifier and the incremented authorization counter.
+export circuit authorize(
+    pin: Uint<16>,
+    target: Bytes<32>,
+    selector: Uint<32>,
+    value: Uint<64>,
+    requestId: Uint<64>,
+    currentTime: Uint<64>
+): Nullifier {
+    // 1. Identity: the agent proves it holds the principal's secret.
+    const sk = getUserSecret();
+    const policy = getPolicy();
+    const pk = derivePrincipalPk(sk, pin);
+    assert(pk == policy.principalPk, "Identity mismatch");
+
+    // 2. Policy must be registered and bound to this principal.
+    const id = policyIdOf(policy);
+    assert(policies.member(disclose(id)), "Unknown policy");
+    assert(principals.lookup(disclose(pk)) == disclose(id),
+           "Policy not bound to principal");
+
+    // 3. Policy gates (the envelope).
+    assert(!policy.paused, "Policy paused");
+
+    //    Time gates. The caller's `currentTime` is a public timestamp
+    //    recorded with the authorization; the circuit asserts it is
+    //    not in the future relative to the on-chain block time
+    //    (blockTimeGte), so a prover cannot claim a moment after the
+    //    block to forge a future-dated authorization. Expiry is
+    //    checked against the on-chain block time (blockTimeLte) so
+    //    a prover cannot bypass an expired policy by lying about
+    //    the wall clock.
+    //
+    //    This guards the on-chain time oracle so a prover cannot
+    //    forge a future-dated authorization (blockTimeGte) nor bypass
+    //    an expired policy by lying about the wall clock (blockTimeLte).
+    assert(disclose(blockTimeGte(disclose(currentTime))),
+           "currentTime is in the future");
+    assert(disclose(blockTimeLte(disclose(policy.expiresAt))),
+           "Policy expired");
+    assert(value <= policy.dailyCap, "Exceeds daily cap");
+
+    // 4. Single-rule match (Wave 1 covers one (target, selector, cap)
+    //    per sigil; Wave 2 extends to a bounded list of rules).
+    assert(policy.rule.target == target, "Target not allowed");
+    assert(policy.rule.selector == selector, "Selector not allowed");
+    assert(value <= policy.rule.perCallCap, "Exceeds per-call cap");
+
+    // 5. Replay protection: each (principal, requestId) authorizes at
+    //    most once. A second attempt with the same nullifier is rejected.
+    const nul = nullifierOf(sk, requestId);
+    assert(!nullifiers.member(disclose(nul)), "Request already authorized");
+    nullifiers.insert(disclose(nul));
+    authorizedCount.increment(1);
+
+    return disclose(nul);
+}
