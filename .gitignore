@@ -1,0 +1,8 @@
+node_modules
+dist
+contract/dist
+contract/src/managed
+.DS_Store
+*.log
+.env
+.env.local
