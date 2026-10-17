@@ -12,13 +12,9 @@
 
 ## What is Sigil?
 
-Sigil is an **on-chain authorization gate** for autonomous agents that
-proves an action is permitted by a private policy — without ever
-publishing the policy, the principal's identity, or the secret that
-binds them. It ships as a small, composable family of Midnight-native
-privacy contracts: a **gate** that enforces a private policy envelope,
-and a **registry** that records a privacy-preserving (principal, agent)
-delegation graph.
+Sigil is a privacy-preserving authorization gate for autonomous agents
+on Midnight. Every action bears a sigil. The policy stays private;
+the proof goes on-chain.
 
 ### The gate
 
