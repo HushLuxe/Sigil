@@ -1,0 +1,17 @@
+{
+  "name": "sigil",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Sigil — privacy-preserving authorization gate for autonomous agents on Midnight",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "contract",
+    "contract-registry"
+  ],
+  "scripts": {
+    "compact": "pnpm -r --filter '@sigil/*' run compact",
+    "test": "pnpm -r --filter '@sigil/*' test",
+    "build": "pnpm -r --filter '@sigil/*' run build"
+  },
+  "packageManager": "pnpm@10.0.0"
+}
