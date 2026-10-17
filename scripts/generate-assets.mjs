@@ -271,27 +271,70 @@ function measureText(text, scale) {
   return text.length * (5 + 1) * scale;
 }
 
-// ---------- ICON (512x512) ----------
+// ---------- MARK (1024x1024) — the icon, no text ----------
 
-function makeIcon() {
-  const W = 512, H = 512;
+function makeMark() {
+  const W = 1024, H = 1024;
   const buf = Buffer.alloc(W * H * 4);
-  // background: vertical gradient midnight blue -> near-black
   fillVerticalGradient(buf, W, H, [14, 18, 48], [4, 6, 18]);
-  // soft radial glow behind the mark
   addRadialGlow(buf, W, H, W / 2, H / 2, W * 0.45, [88, 110, 220]);
-  // the sigil mark
   drawSigilMark(buf, W, H, W / 2, H / 2, W * 0.36, [232, 240, 255]);
   return encodePNG(W, H, buf);
 }
 
-// ---------- BANNER (1280x640) ----------
+// ---------- ICON (512x512) — same mark, smaller ----------
+
+function makeIcon() {
+  const W = 512, H = 512;
+  const buf = Buffer.alloc(W * H * 4);
+  fillVerticalGradient(buf, W, H, [14, 18, 48], [4, 6, 18]);
+  addRadialGlow(buf, W, H, W / 2, H / 2, W * 0.45, [88, 110, 220]);
+  drawSigilMark(buf, W, H, W / 2, H / 2, W * 0.36, [232, 240, 255]);
+  return encodePNG(W, H, buf);
+}
+
+// ---------- LOGO (1600x600) — mark + wordmark side by side ----------
+
+function makeLogo() {
+  const W = 1600, H = 600;
+  const buf = Buffer.alloc(W * H * 4);
+  fillVerticalGradient(buf, W, H, [16, 20, 56], [4, 6, 18]);
+  addRadialGlow(buf, W, H, 360, 300, 420, [70, 96, 220]);
+  addRadialGlow(buf, W, H, 1240, 300, 360, [120, 80, 220]);
+
+  // the mark, left
+  drawSigilMark(buf, W, H, 360, 300, 180, [232, 240, 255]);
+
+  // wordmark, right
+  const wordX = 640;
+  const text  = [240, 244, 255];
+  const dim   = [170, 180, 210];
+
+  // SIGIL — big
+  const sigilText  = "SIGIL";
+  const sigilScale = 22;
+  drawText(buf, W, H, sigilText, wordX, 200, sigilScale, text);
+
+  // divider rule
+  const ruleY = 200 + 7 * sigilScale + 18;
+  for (let x = wordX; x < wordX + 760; x++) {
+    blend(buf, x, ruleY, W, 120, 140, 200, 120);
+  }
+
+  // tagline
+  const tag     = "EVERY ACTION BEARS A SIGIL";
+  const tagScale = 5;
+  drawText(buf, W, H, tag, wordX, ruleY + 18, tagScale, dim);
+
+  return encodePNG(W, H, buf);
+}
+
+// ---------- BANNER (1280x640) — social card / submission cover ----------
 
 function makeBanner() {
   const W = 1280, H = 640;
   const buf = Buffer.alloc(W * H * 4);
   fillVerticalGradient(buf, W, H, [16, 20, 56], [4, 6, 18]);
-  // asymmetric glow
   addRadialGlow(buf, W, H, 360, 320, 420, [70, 96, 220]);
   addRadialGlow(buf, W, H, 980, 360, 360, [120, 80, 220]);
 
@@ -306,19 +349,16 @@ function makeBanner() {
   // SIGIL — big
   const sigilText = "SIGIL";
   const sigilScale = 14;
-  const sigilW = measureText(sigilText, sigilScale);
   drawText(buf, W, H, sigilText, textX, 200, sigilScale, textColor);
 
   // tagline
   const tag = "EVERY ACTION BEARS A SIGIL";
   const tagScale = 4;
-  const tagW = measureText(tag, tagScale);
   drawText(buf, W, H, tag, textX, 200 + 7 * sigilScale + 28, tagScale, dim);
 
   // URL line
   const url = "GITHUB.COM / HUSHLUXE / SIGIL";
   const urlScale = 3;
-  const urlW = measureText(url, urlScale);
   drawText(buf, W, H, url, textX, 200 + 7 * sigilScale + 28 + 7 * tagScale + 36, urlScale, [140, 160, 210]);
 
   return encodePNG(W, H, buf);
@@ -329,10 +369,16 @@ function makeBanner() {
 const outDir = path.join(__dirname, "..", "assets");
 fs.mkdirSync(outDir, { recursive: true });
 
+const mark = makeMark();
+fs.writeFileSync(path.join(outDir, "mark.png"), mark);
 const icon = makeIcon();
 fs.writeFileSync(path.join(outDir, "icon.png"), icon);
+const logo = makeLogo();
+fs.writeFileSync(path.join(outDir, "logo.png"), logo);
 const banner = makeBanner();
 fs.writeFileSync(path.join(outDir, "banner.png"), banner);
 
+console.log("wrote", path.join(outDir, "mark.png"),   "(" + mark.length   + " bytes)");
 console.log("wrote", path.join(outDir, "icon.png"),   "(" + icon.length   + " bytes)");
+console.log("wrote", path.join(outDir, "logo.png"),   "(" + logo.length   + " bytes)");
 console.log("wrote", path.join(outDir, "banner.png"), "(" + banner.length + " bytes)");
