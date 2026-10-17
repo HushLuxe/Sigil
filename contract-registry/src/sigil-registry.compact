@@ -1,0 +1,161 @@
+// This file is part of HushLuxe/sigil.
+//
+// Sigil Registry — Wave 2: a privacy-preserving agent/principal
+// registry on Midnight. A principal proves control of a secret-derived
+// public commitment and authorises or revokes agent commitments bound
+// to that principal. The on-chain representation is a flat set of
+// (principal, agent) pair-hashes, so the registry reveals only
+// membership, not the secret-derived materials.
+//
+// Copyright (C) 2026 HushLuxe contributors
+// SPDX-License-Identifier: Apache-2.0
+
+pragma language_version >= 0.20;
+import CompactStandardLibrary;
+
+// =====================================================================
+// Types
+// =====================================================================
+
+// Stable public commitment to a principal (hash of secret + pin).
+export new type PrincipalCommitment = Bytes<32>;
+
+// Stable public commitment to an agent (hash of the agent's own secret).
+export new type AgentCommitment = Bytes<32>;
+
+// The principal's secret. Combined with the pin, derives the principal
+// commitment. Domain-separated from the gate contract's secret slot.
+export new type SecretKey = Bytes<32>;
+
+// A (principal, agent) pair-hash: the canonical on-chain key that
+// records that a specific agent is (or was) authorised by a specific
+// principal. Storing pair-hashes (rather than a Map<Principal, Set<Agent>>)
+// keeps the ledger representation flat and the circuits uniform.
+export new type PairHash = Bytes<32>;
+
+// =====================================================================
+// Public ledger state
+// =====================================================================
+
+// Every principal commitment that has been registered on-chain.
+export ledger principals: Set<PrincipalCommitment>;
+
+// The set of currently authorised (principal, agent) pair-hashes.
+// Membership here means "agent is authorised by principal."
+export ledger authorisedPairs: Set<PairHash>;
+
+// The set of (principal, agent) pair-hashes that have been revoked.
+// Recorded so a revoked pair cannot be silently re-registered without
+// the principal explicitly re-adding it (which would be a no-op since
+// revocation is idempotent on the set).
+export ledger revokedPairs: Set<PairHash>;
+
+// Public counters.
+export ledger registeredPrincipals: Counter;
+export ledger registeredAgents: Counter;
+export ledger revokedAgentsCount: Counter;
+
+// =====================================================================
+// Private witnesses
+// =====================================================================
+
+// The principal's 32-byte secret.
+witness getUserSecret(): SecretKey;
+
+// =====================================================================
+// Pure circuits: commitment + pair-hash derivation
+// (domain-separated from the gate contract so a leak in one cannot
+// impersonate in the other)
+// =====================================================================
+
+// Derive the principal's public commitment from a secret and PIN.
+export pure circuit derivePrincipalCommitment(
+    sk: SecretKey,
+    pin: Uint<16>
+): PrincipalCommitment {
+    return persistentHash<[Bytes<20>, Bytes<32>, SecretKey]>([
+        "sigil:reg:principal:",
+        persistentHash<Uint<16>>(pin),
+        sk
+    ]) as PrincipalCommitment;
+}
+
+// Compute the canonical (principal, agent) pair-hash.
+export pure circuit pairHashOf(
+    principal: PrincipalCommitment,
+    agent: AgentCommitment
+): PairHash {
+    return persistentHash<[Bytes<15>, PrincipalCommitment, AgentCommitment]>([
+        "sigil:reg:pair:",
+        principal,
+        agent
+    ]) as PairHash;
+}
+
+// =====================================================================
+// Circuit: register a principal commitment
+// =====================================================================
+export circuit registerPrincipal(pin: Uint<16>): PrincipalCommitment {
+    const sk = getUserSecret();
+    const pc = derivePrincipalCommitment(sk, pin);
+    assert(!principals.member(disclose(pc)), "Principal already registered");
+    principals.insert(disclose(pc));
+    registeredPrincipals.increment(1);
+    return disclose(pc);
+}
+
+// =====================================================================
+// Circuit: register an agent commitment under a principal
+// =====================================================================
+// Proves control of the principal's secret and adds the (principal,
+// agent) pair-hash to the authorised set.
+export circuit registerAgent(
+    pin: Uint<16>,
+    agentCommitment: AgentCommitment
+): PairHash {
+    const sk = getUserSecret();
+    const pc = derivePrincipalCommitment(sk, pin);
+    assert(principals.member(disclose(pc)), "Unknown principal");
+
+    const ph = pairHashOf(disclose(pc), agentCommitment);
+    assert(!authorisedPairs.member(disclose(ph)), "Agent already registered");
+    assert(!revokedPairs.member(disclose(ph)), "Agent was revoked");
+
+    authorisedPairs.insert(disclose(ph));
+    registeredAgents.increment(1);
+    return disclose(ph);
+}
+
+// =====================================================================
+// Circuit: revoke an agent commitment
+// =====================================================================
+export circuit revokeAgent(
+    pin: Uint<16>,
+    agentCommitment: AgentCommitment
+): PairHash {
+    const sk = getUserSecret();
+    const pc = derivePrincipalCommitment(sk, pin);
+    assert(principals.member(disclose(pc)), "Unknown principal");
+
+    const ph = pairHashOf(disclose(pc), agentCommitment);
+    assert(!revokedPairs.member(disclose(ph)), "Already revoked");
+    assert(authorisedPairs.member(disclose(ph)), "Agent not registered");
+
+    authorisedPairs.remove(disclose(ph));
+    revokedPairs.insert(disclose(ph));
+    revokedAgentsCount.increment(1);
+    return disclose(ph);
+}
+
+// =====================================================================
+// Query: is a given (principal, agent) pair currently authorised?
+// =====================================================================
+// Public query; the principal and agent commitments are disclosed
+// (they are public by construction once registered), and the circuit
+// returns only the boolean.
+export circuit isAgentAuthorized(
+    principal: PrincipalCommitment,
+    agent: AgentCommitment
+): Boolean {
+    return authorisedPairs.member(pairHashOf(disclose(principal), disclose(agent)));
+}
